@@ -1,27 +1,43 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Keyapp
 {
     public class CommandRunner : IDisposable
     {
+        private const string endMarker = "!!END!!";
+
         private readonly Process process;
-        private bool initialized = false;
+        private readonly SemaphoreSlim semaphore = new(1);
+        private readonly StringBuilder errorBuffer = new();
         public CommandRunner()
         {
             process = new Process();
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.WindowStyle = ProcessWindowStyle.Hidden;
-            startInfo.FileName = "cmd.exe";
+            startInfo.FileName = "adb.exe";
+            startInfo.Arguments = "shell";
             startInfo.CreateNoWindow = true;
             startInfo.RedirectStandardOutput = true;
             startInfo.RedirectStandardInput = true;
+            startInfo.RedirectStandardError = true;
             startInfo.UseShellExecute = false;
 
+            process.ErrorDataReceived += ErrorDataReceived;
             process.StartInfo = startInfo;
             process.Start();
+            process.BeginErrorReadLine();
+        }
+
+        private void ErrorDataReceived(object sender, DataReceivedEventArgs e)
+        {
+            if (!string.IsNullOrEmpty(e.Data))
+            {
+                errorBuffer.Append(e.Data);
+            }
         }
 
         public void Dispose()
@@ -32,33 +48,43 @@ namespace Keyapp
 
         public async Task<string> RunCommand(string command)
         {
-            Trace.WriteLine($"running command {command}");
-            // TODO semaphore
-            if (!initialized)
+            semaphore.Wait();
+            try
             {
-                // read out cmd intro
-                Trace.WriteLine("Setting up cmd, reading windows info");
-                while (!string.IsNullOrEmpty(await process.StandardOutput.ReadLineAsync()))
+                Trace.WriteLine($"running command {command}");
+                string? line;
+
+                ThrowIfError();
+
+                await process.StandardInput.WriteLineAsync(command);
+                await process.StandardInput.WriteLineAsync($"echo {endMarker}");
+                await process.StandardInput.FlushAsync();
+                var output = new StringBuilder();
+                while (!string.IsNullOrEmpty(line = await process.StandardOutput.ReadLineAsync()) && line != endMarker)
                 {
+                    output.AppendLine(line);
                 }
-                initialized = true;
-            }
 
-            await process.StandardInput.WriteLineAsync(command);
-            await process.StandardInput.FlushAsync();
-            var output = new StringBuilder();
-            string? line;
-            // skip one line which is the command itself
-            await process.StandardOutput.ReadLineAsync();
-            while (!string.IsNullOrEmpty(line = await process.StandardOutput.ReadLineAsync()))
+                ThrowIfError();
+
+                var result = output.ToString();
+                Trace.WriteLine($"result: {result}");
+                return result;
+            }
+            finally
             {
-                output.AppendLine(line);
+                semaphore.Release();
             }
+        }
 
-            var result = output.ToString();
-            Trace.WriteLine($"result: {result}");
-
-            return result;
+        private void ThrowIfError()
+        {
+            if (errorBuffer.Length > 0)
+            {
+                var bufferContents = errorBuffer.ToString();
+                errorBuffer.Clear();
+                throw new AppException($"Adb error: {bufferContents}");
+            }
         }
     }
 }

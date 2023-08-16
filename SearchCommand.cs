@@ -1,10 +1,5 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Text;
+﻿using System.Linq;
 using System.Threading.Tasks;
-using System.Windows.Navigation;
 using System.Xml;
 
 namespace Keyapp
@@ -31,7 +26,6 @@ namespace Keyapp
 
         public async Task<string> Execute(string searchQuerry)
         {
-            // TODO check if adb installed and error;
             await CloseAll();
             await StartChrome();
 
@@ -63,19 +57,28 @@ namespace Keyapp
 
         public async Task CloseAll()
         {
-            var sizeInfo = await commandRunner.RunCommand("adb shell wm size");
+            var sizeInfo = await commandRunner.RunCommand("wm size");
             var size = sizeInfo.Substring(sizeInfo.LastIndexOf(" ")).Split('x');
             var x = int.Parse(size[0]) / 2;
             var y1 = int.Parse(size[1]) / 3;
             var y0 = y1 * 2;
 
-            await commandRunner.RunCommand("adb shell input keyevent KEYCODE_HOME");
-            await commandRunner.RunCommand("adb shell input keyevent KEYCODE_APP_SWITCH");
-            while ((await GetRoot()).SelectSingleNode("//*[@resource-id='com.google.android.apps.nexuslauncher:id/snapshot']") != null) 
+            await commandRunner.RunCommand("input keyevent KEYCODE_HOME");
+            await commandRunner.RunCommand("input keyevent KEYCODE_APP_SWITCH");
+            var rootNode = await WaitFor("//*[@resource-id='com.google.android.apps.nexuslauncher:id/scrim_view']");
+            var pannelCount = rootNode.SelectNodes("//*[@resource-id='com.google.android.apps.nexuslauncher:id/snapshot']")?.Count ?? 0;
+
+            while (pannelCount > 0)
             {
-                await commandRunner.RunCommand($"adb shell input swipe {x} {y0} {x} {y1}");
+                for (var i = 0; i < pannelCount; i++)
+                {
+                    await commandRunner.RunCommand($"input swipe {x} {y0} {x} {y1}");
+                }
+
+                rootNode = await GetRoot();
+                pannelCount = rootNode.SelectNodes("//*[@resource-id='com.google.android.apps.nexuslauncher:id/snapshot']")?.Count ?? 0;
             }
-            await commandRunner.RunCommand("adb shell input keyevent KEYCODE_HOME");
+            await commandRunner.RunCommand("input keyevent KEYCODE_HOME");
         }
 
         private async Task StartChrome()
@@ -101,12 +104,7 @@ namespace Keyapp
             var acceptTermsButton = rootNode.SelectSingleNode(acceptTearmsButtonXpath);
             if (acceptTermsButton != null)
             {
-                //TODO replace with common one
-                var boundsString = acceptTermsButton.Attributes!["bounds"]!.Value!;
-
-                var values = boundsString.Replace("][", ",").Replace("[", "").Replace("]", "").Split(",").Select(s => int.Parse(s)).ToArray();
-                await commandRunner.RunCommand($"adb shell input tap {values[0]} {values[1]}");
-
+                await TapOnNode(acceptTermsButton);
                 rootNode = await WaitFor(noThanksButtonXpath);
                 actionsTaken = true;
             }
@@ -137,8 +135,8 @@ namespace Keyapp
             var searchField = FindSearchField(rootElement);
 
             await TapOnNode(searchField);
-            await commandRunner.RunCommand($"adb shell input text {querryText.Replace(" ", "%s")}");
-            await commandRunner.RunCommand($"adb shell input keyevent KEYCODE_ENTER");
+            await commandRunner.RunCommand($"input text {querryText.Replace(" ", "%s")}");
+            await commandRunner.RunCommand($"input keyevent KEYCODE_ENTER");
         }
 
         private Task<XmlElement> WaitFor(string xpath, int step = 500, int timeout = 10000)
@@ -166,16 +164,23 @@ namespace Keyapp
 
         private async Task<XmlElement> GetRoot()
         {
-            // TODO parse location for pull
-            await commandRunner.RunCommand("adb shell uiautomator dump && adb pull /sdcard/window_dump.xml");
-            var file = await File.ReadAllTextAsync("./window_dump.xml");
+            var dumpResult = await commandRunner.RunCommand("uiautomator dump");
+
+            var pathStartIndex = dumpResult.IndexOf("/");
+            if (pathStartIndex == -1)
+            {
+                throw new AppException($"Failed to parse path of uiautomator dump. Dump output: {dumpResult}");
+            }
+
+            var hierarchyPath = dumpResult.Substring(pathStartIndex).Replace("\n", "").Replace("\r", "");
+            var hierarchyXml = await commandRunner.RunCommand($"cat {hierarchyPath} ; echo");
 
             var xmlDoc = new XmlDocument();
-            xmlDoc.LoadXml(file);
+            xmlDoc.LoadXml(hierarchyXml);
 
             if (xmlDoc.DocumentElement == null)
             {
-                throw new AppException($"Failed to parse uiautomatordump contents: {file}");
+                throw new AppException($"Failed to parse uiautomatordump contents from file: {hierarchyPath} contents: {hierarchyXml}");
             }
 
             return xmlDoc.DocumentElement;
@@ -249,7 +254,7 @@ namespace Keyapp
             var centerX = x0 + ((x1 - x0) / 2);
             var centerY = y0 + ((y1 - y0) / 2);
 
-            await commandRunner.RunCommand($"adb shell input tap {centerX} {centerY}");
+            await commandRunner.RunCommand($"input tap {centerX} {centerY}");
         }
     }
 }
